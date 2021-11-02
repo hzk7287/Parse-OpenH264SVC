@@ -1,229 +1,190 @@
-// rtspSend.cpp : Defines the entry point for the console application.
-//
+#include <iostream>
+#include <fstream>
+using namespace std;
 
 
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <memory.h>
-#include "h264.h"
-static char* dumpRoot = ".\\dump\\";
-static char file2open[1024];
-#define  UDP_MAX_SIZE 1400
-
-
-
-FILE* bits = NULL;                //!< the bit stream file
-static int FindStartCode2(unsigned char* Buf);//²éÕÒ¿ªÊ¼×Ö·û0x000001
-static int FindStartCode3(unsigned char* Buf);//²éÕÒ¿ªÊ¼×Ö·û0x00000001
-
-// 
-static int info2 = 0, info3 = 0;
-// RTP_FIXED_HEADER *rtp_hdr;
-
-// NALU_HEADER      *nalu_hdr;
-// FU_INDICATOR *fu_ind;
-// FU_HEADER        *fu_hdr;
-
-FILE* getFile()
+typedef struct
 {
-    return bits;
+	uint32_t len;                     //! Length of the NAL unit (Excluding the start code, which does not belong to the NALU)
+	int32_t forbidden_bit;            //! should be always FALSE
+	int32_t nal_reference_idc;        //! NALU_PRIORITY_xxxx
+	int32_t nal_unit_type;            //! NALU_TYPE_xxxx
+	char* buf;                        //! contains the first byte followed by the EBSP
+} NALU_t;
+
+
+char* DetectStartCodePrefix(const char* kpBuf, char* pOffset, char iBufSize) {
+	char* pBits = (char*)kpBuf;
+
+	do {
+		int iIdx = 0;
+		while ((iIdx < iBufSize) && (!(*pBits))) {
+			++pBits;
+			++iIdx;
+		}
+		if (iIdx >= iBufSize)  break;
+
+		++iIdx;
+		++pBits;
+
+		if ((iIdx >= 3) && ((*(pBits - 1)) == 0x1)) {
+			*pOffset = (int)(((uintptr_t)pBits) - ((uintptr_t)kpBuf));
+			return pBits;
+		}
+
+		iBufSize -= iIdx;
+	} while (1);
+
+	return NULL;
 }
 
-//ÎªNALU_t½á¹¹Ìå·ÖÅäÄÚ´æ¿Õ¼ä
-NALU_t* AllocNALU(int buffersize)
+static int FindStartCode(const char* buf)
 {
-    NALU_t* nal = NULL;
+	if (buf[0] != 0x0 || buf[1] != 0x0) {
+		return 0;
+	}
 
-    if ((nal = (NALU_t*)calloc(1, sizeof(NALU_t))) == NULL)
-    {
-        printf("AllocNALU: n");
-        exit(0);
-    }
-
-    nal->max_size = buffersize;
-
-    if ((nal->buf = (char*)calloc(buffersize, sizeof(char))) == NULL)
-    {
-        free(nal);
-        printf("AllocNALU: nal->buf");
-        exit(0);
-    }
-
-    return nal;
+	if (buf[2] == 0x1) {
+		return 3;
+	}
+	else if (buf[2] == 0x0) {
+		if (buf[3] == 0x1) {
+			return 4;
+		}
+		else {
+			return 0;
+		}
+	}
+	else {
+		return 0;
+	}
+	return 0;
 }
 
-//ÊÍ·Å
-void FreeNALU(NALU_t* n)
+static int32_t ReadOneNaluFromBuf(const char* buffer, uint32_t nBufferSize, uint32_t offSet, NALU_t* pNalu)
 {
-    if (n)
-    {
-        if (n->buf)
-        {
-            free(n->buf);
-            n->buf = NULL;
-        }
-        free(n);
-    }
+	uint32_t start = 0;
+	if (offSet < nBufferSize) {
+		start = FindStartCode(buffer + offSet);
+		if (start != 0) {
+			uint32_t pos = start;
+			while (offSet + pos < nBufferSize) {
+				if (buffer[offSet + pos++] == 0x00 &&
+					buffer[offSet + pos++] == 0x00 &&
+					buffer[offSet + pos++] == 0x00 &&
+					buffer[offSet + pos++] == 0x01
+					) {
+					break;
+				}
+			}
+
+			if (offSet + pos == nBufferSize) {
+				pNalu->len = pos - start;
+			}
+			else {
+				pNalu->len = (pos - 4) - start;
+			}
+
+			pNalu->buf = (char*)&buffer[offSet + start];
+			pNalu->forbidden_bit = pNalu->buf[0] >> 7;
+			pNalu->nal_reference_idc = pNalu->buf[0] >> 5; // 2 bit
+			pNalu->nal_unit_type = (pNalu->buf[0]) & 0x1f;// 5 bit
+			return (pNalu->len + start);
+		}
+	}
+
+	return 0;
 }
 
-void OpenBitstreamFile(char* fn)
+void parseH264(const char* pH264, uint32_t bufLen)
 {
-    if (NULL == (bits = fopen(fn, "rb")))
-    {
-        printf("open file error\n");
-        exit(0);
-    }
+	NALU_t nalu;
+	int32_t pos = 0, len = 0;
+	len = ReadOneNaluFromBuf(pH264, bufLen, pos, &nalu);
+	while (len != 0) {
+		printf("## nalu type(%d)\n", nalu.nal_unit_type);
+		pos += len;
+		len = ReadOneNaluFromBuf(pH264, bufLen, pos, &nalu);
+	}
+
 }
 
-//Õâ¸öº¯ÊýÊäÈëÎªÒ»¸öNAL½á¹¹Ìå£¬Ö÷Òª¹¦ÄÜÎªµÃµ½Ò»¸öÍêÕûµÄNALU²¢±£´æÔÚNALU_tµÄbufÖÐ£¬
-//»ñÈ¡ËûµÄ³¤¶È£¬Ìî³äF,IDC,TYPEÎ»¡£
-//²¢ÇÒ·µ»ØÁ½¸ö¿ªÊ¼×Ö·ûÖ®¼ä¼ä¸ôµÄ×Ö½ÚÊý£¬¼´°üº¬ÓÐÇ°×ºµÄNALUµÄ³¤¶È
-int GetAnnexbNALU(NALU_t* nalu)
-{
-    int pos = 0;
-    int StartCodeFound, rewind;
-    unsigned char* Buf;
 
-    if ((Buf = (unsigned char*)calloc(nalu->max_size, sizeof(char))) == NULL)
-        printf("GetAnnexbNALU: Could not allocate Buf memory\n");
+int main() {
+	filebuf* pbuf;
+	ifstream filestr;
+	ofstream fileout;
+	long size;
+	int i = 0;
+	char* buffer;
+	char* outbuffer;
+	int32_t iBufPos = 0;
+	int32_t iSrcConsumed = 0;
+	char iOffset = 0;
+	int32_t iSliceSize=0;
+	int32_t iSrcLength = 0;
 
-    nalu->startcodeprefix_len = 3;//³õÊ¼»¯ÂëÁ÷ÐòÁÐµÄ¿ªÊ¼×Ö·ûÎª3¸ö×Ö½Ú
+	NALU_t nalu;
+	int32_t pos = 0, len = 0, posout = 0, posp = 0, pospout=0;
+	char* pSrcNal = NULL;
+	char* pDstNal = NULL;
 
-    if (3 != fread(Buf, 1, 3, bits))//´ÓÂëÁ÷ÖÐ¶Á3¸ö×Ö½Ú
-    {
-        free(Buf);
-        return 0;
-    }
-    info2 = FindStartCode2(Buf);//ÅÐ¶ÏÊÇ·ñÎª0x000001 
-    if (info2 != 1)
-    {
-        //Èç¹û²»ÊÇ£¬ÔÙ¶ÁÒ»¸ö×Ö½Ú
-        if (1 != fread(Buf + 3, 1, 1, bits))//¶ÁÒ»¸ö×Ö½Ú
-        {
-            free(Buf);
-            return 0;
-        }
-        info3 = FindStartCode3(Buf);//ÅÐ¶ÏÊÇ·ñÎª0x00000001
-        if (info3 != 1)//Èç¹û²»ÊÇ£¬·µ»Ø-1
-        {
-            free(Buf);
-            return -1;
-        }
-        else
-        {
-            //Èç¹ûÊÇ0x00000001,µÃµ½¿ªÊ¼Ç°×ºÎª4¸ö×Ö½Ú
-            pos = 4;
-            nalu->startcodeprefix_len = 4;
-        }
-    }
-    else
-    {
-        //Èç¹ûÊÇ0x000001,µÃµ½¿ªÊ¼Ç°×ºÎª3¸ö×Ö½Ú
-        nalu->startcodeprefix_len = 3;
-        pos = 3;
-    }
-    //²éÕÒÏÂÒ»¸ö¿ªÊ¼×Ö·ûµÄ±êÖ¾Î»
-    StartCodeFound = 0;
-    info2 = 0;
-    info3 = 0;
 
-    while (!StartCodeFound)
-    {
-        if (feof(bits))//ÅÐ¶ÏÊÇ·ñµ½ÁËÎÄ¼þÎ²
-        {
-            nalu->len = (pos - 1) - nalu->startcodeprefix_len;
-            memcpy(nalu->buf, &Buf[nalu->startcodeprefix_len], nalu->len);
-            nalu->forbidden_bit = nalu->buf[0] & 0x80; //1 bit
-            nalu->nal_reference_idc = nalu->buf[0] & 0x60; // 2 bit
-            nalu->nal_unit_type = (nalu->buf[0]) & 0x1f;// 5 bit
-            free(Buf);
-            return pos - 1;
-        }
-        Buf[pos++] = fgetc(bits);//¶ÁÒ»¸ö×Ö½Úµ½BUFÖÐ
-        info3 = FindStartCode3(&Buf[pos - 4]);//ÅÐ¶ÏÊÇ·ñÎª0x00000001
-        if (info3 != 1)
-            info2 = FindStartCode2(&Buf[pos - 3]);//ÅÐ¶ÏÊÇ·ñÎª0x000001
-        StartCodeFound = (info2 == 1 || info3 == 1);
-    }
+	// è¦è¯»å…¥æ•´ä¸ªæ–‡ä»¶ï¼Œå¿…é¡»é‡‡ç”¨äºŒè¿›åˆ¶æ‰“å¼€ 
+	filestr.open("test.264", ios::binary);
+	fileout.open("testvdlaye0.264", ios::binary);
+	// èŽ·å–filestrå¯¹åº”bufferå¯¹è±¡çš„æŒ‡é’ˆ 
+	pbuf = filestr.rdbuf();
 
-    // Here, we have found another start code (and read length of startcode bytes more than we should
-    // have.  Hence, go back in the file
-    rewind = (info3 == 1) ? -4 : -3;
+	// è°ƒç”¨bufferå¯¹è±¡æ–¹æ³•èŽ·å–æ–‡ä»¶å¤§å°
+	size = pbuf->pubseekoff(0, ios::end, ios::in);
+	pbuf->pubseekpos(0, ios::in);
 
-    if (0 != fseek(bits, rewind, SEEK_CUR))//°ÑÎÄ¼þÖ¸ÕëÖ¸ÏòÇ°Ò»¸öNALUµÄÄ©Î²
-    {
-        free(Buf);
-        printf("GetAnnexbNALU: Cannot fseek in the bit stream file");
-    }
+	// åˆ†é…å†…å­˜ç©ºé—´ +1æ˜¯å…³é”®ï¼Œä¸ç„¶åˆäº›æ–‡ä»¶ä¼šä¹±ç 
+	buffer = new char[size + 1];
+	outbuffer = new char[size + 1];
+	// èŽ·å–æ–‡ä»¶å†…å®¹
+	pbuf->sgetn(buffer, size);
+	uint8_t uiDependencyId=255;
 
-    // Here the Start code, the complete NALU, and the next start code is in the Buf.  
-    // The size of Buf is pos, pos+rewind are the number of bytes excluding the next
-    // start code, and (pos+rewind)-startcodeprefix_len is the size of the NALU excluding the start code
+	len = ReadOneNaluFromBuf(buffer, size, pos, &nalu);
+	while (len != 0) {
+		printf("## nalu type(%d)\n", nalu.nal_unit_type);
+		if (nalu.nal_unit_type == 14|| nalu.nal_unit_type == 20)
+		{	
+			uint8_t uiCurByte = *(++nalu.buf);
+			uint8_t bIdrFlag = !!(uiCurByte & 0x40);
+			uint8_t uiPriorityId = uiCurByte & 0x3F;
 
-    nalu->len = (pos + rewind) - nalu->startcodeprefix_len;
-    memcpy(nalu->buf, &Buf[nalu->startcodeprefix_len], nalu->len);//¿½±´Ò»¸öÍêÕûNALU£¬²»¿½±´ÆðÊ¼Ç°×º0x000001»ò0x00000001
-    nalu->forbidden_bit = nalu->buf[0] & 0x80;      //1 bit
-    nalu->nal_reference_idc = nalu->buf[0] & 0x60;  //2 bit
-    nalu->nal_unit_type = (nalu->buf[0]) & 0x1f;    //5 bit
-    free(Buf);
+			uiCurByte = *(++nalu.buf);
+			uint8_t NoInterLayerPredFlag = uiCurByte >> 7;
+			uiDependencyId = (uiCurByte & 0x70) >> 4;
+			uint8_t uiQualityId = uiCurByte & 0x0F;
+			uiCurByte = *(++nalu.buf);
+			uint8_t uiTemporalId = uiCurByte >> 5;
+			uint8_t bUseRefBasePicFlag = !!(uiCurByte & 0x10);
+			uint8_t bDiscardableFlag = !!(uiCurByte & 0x08);
+			uint8_t bOutputFlag = !!(uiCurByte & 0x04);
+			uint8_t uiReservedThree2Bits = uiCurByte & 0x03;
+			uint8_t uiLayerDqId = (uiDependencyId << 4) | uiQualityId;
+			cout << "uiDependencyId:"<<endl<<(int)uiDependencyId << endl;
+			cout << "uiTemporalId:" << endl << (int)uiTemporalId << endl;
+		}
+		posp = pos;
+		pospout = posout;
+		pos += len;
+		if (uiDependencyId != 1)
+		{
+			posout += len;
+			memcpy(outbuffer + pospout, buffer + posp, len);
+		}
+		len = ReadOneNaluFromBuf(buffer, size, pos, &nalu);
+		//uiDependencyId = 1;
+	}
+	//for (uint8_t i = 0; i < pos; i++)
+	fileout.write(outbuffer, posout);
+	fileout.close();
 
-    return (pos + rewind);//·µ»ØÁ½¸ö¿ªÊ¼×Ö·ûÖ®¼ä¼ä¸ôµÄ×Ö½ÚÊý£¬¼´°üº¬ÓÐÇ°×ºµÄNALUµÄ³¤¶È
-}
-
-static int FindStartCode2(unsigned char* Buf)
-{
-    if (Buf[0] != 0 || Buf[1] != 0 || Buf[2] != 1)
-        return 0; //ÅÐ¶ÏÊÇ·ñÎª0x000001,Èç¹ûÊÇ·µ»Ø1
-    else
-        return 1;
-}
-
-static int FindStartCode3(unsigned char* Buf)
-{
-    if (Buf[0] != 0 || Buf[1] != 0 || Buf[2] != 0 || Buf[3] != 1)
-        return 0;//ÅÐ¶ÏÊÇ·ñÎª0x00000001,Èç¹ûÊÇ·µ»Ø1
-    else
-        return 1;
-}
-
-int rtpnum = 0;
-
-//Êä³öNALU³¤¶ÈºÍTYPE
-void dump(NALU_t* nal)
-{
-    if (!nal)
-        return;
-    printf("%3d, len: %6d  ", rtpnum++, nal->len);
-    printf("nal_unit_type: %x\n", nal->nal_unit_type);
-}
-
-int DumpChar(char* filename, char* buf, int len)
-{
-    FILE* file;
-    int w, h;
-    unsigned char* temp = (unsigned char*)buf;
-    sprintf(file2open, "%s%s", dumpRoot, filename);
-    int mHeight = 0;
-    int mWidth = 100;
-    int mYu = 0;
-    mHeight = len / 100;
-    mYu = len % 100;
-    file = fopen(file2open, "w+");
-    for (h = 0; h < mHeight; h++)
-    {
-        for (w = 0; w < mWidth - 1; w++)
-        {
-            fprintf_s(file, "%3x,", temp[h * mWidth + w]);
-        }
-        fprintf_s(file, "%3x\n", temp[h * mWidth + w]);
-    }
-
-    for (w = 0; w < mYu - 1; w++)
-    {
-        fprintf_s(file, "%3x,", temp[h * mWidth + w]);
-    }
-    fprintf_s(file, "%3x\n", temp[h * mWidth + w]);
-    fclose(file);
-    return 0;
+	delete[]buffer;
+	return 0;
 }
