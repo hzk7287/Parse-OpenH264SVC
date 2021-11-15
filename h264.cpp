@@ -121,18 +121,18 @@ int main() {
 	int32_t iBufPos = 0;
 	int32_t iSrcConsumed = 0;
 	char iOffset = 0;
-	int32_t iSliceSize=0;
+	int32_t iSliceSize = 0;
 	int32_t iSrcLength = 0;
 
 	NALU_t nalu;
-	int32_t pos = 0, len = 0, posout = 0, posp = 0, pospout=0;
+	int32_t pos = 0, len = 0, posout = 0, posp = 0, pospout = 0;
 	char* pSrcNal = NULL;
 	char* pDstNal = NULL;
 
 
 	// 要读入整个文件，必须采用二进制打开 
 	filestr.open("test.264", ios::binary);
-	fileout.open("testvdlaye0.264", ios::binary);
+	fileout.open("testvdlay1.264", ios::binary);
 	// 获取filestr对应buffer对象的指针 
 	pbuf = filestr.rdbuf();
 
@@ -145,13 +145,13 @@ int main() {
 	outbuffer = new char[size + 1];
 	// 获取文件内容
 	pbuf->sgetn(buffer, size);
-	uint8_t uiDependencyId=255;
+	uint8_t uiDependencyId = 255;
 
 	len = ReadOneNaluFromBuf(buffer, size, pos, &nalu);
 	while (len != 0) {
 		printf("## nalu type(%d)\n", nalu.nal_unit_type);
-		if (nalu.nal_unit_type == 14|| nalu.nal_unit_type == 20)
-		{	
+		if (nalu.nal_unit_type == 14 || nalu.nal_unit_type == 20)
+		{
 			uint8_t uiCurByte = *(++nalu.buf);
 			uint8_t bIdrFlag = !!(uiCurByte & 0x40);
 			uint8_t uiPriorityId = uiCurByte & 0x3F;
@@ -167,24 +167,27 @@ int main() {
 			uint8_t bOutputFlag = !!(uiCurByte & 0x04);
 			uint8_t uiReservedThree2Bits = uiCurByte & 0x03;
 			uint8_t uiLayerDqId = (uiDependencyId << 4) | uiQualityId;
-			cout << "uiDependencyId:"<<endl<<(int)uiDependencyId << endl;
+			cout << "uiDependencyId:" << endl << (int)uiDependencyId << endl;
 			cout << "uiTemporalId:" << endl << (int)uiTemporalId << endl;
 		}
 		posp = pos;
 		pospout = posout;
 		pos += len;
-		if (uiDependencyId != 1)
+		if (uiDependencyId == 1 || uiDependencyId == 255)
 		{
 			posout += len;
-			memcpy(outbuffer + pospout, buffer + posp, len);
+			memcpy(outbuffer + pospout, buffer + posp, len );
+			//memcpy(outbuffer + pospout, buffer + posp, 1);
+			//memcpy(outbuffer + pospout+1, buffer + posp+1+24, len-25);
+			uiDependencyId = 255;
 		}
-		len = ReadOneNaluFromBuf(buffer, size, pos, &nalu);
-		//uiDependencyId = 1;
+		len = ReadOneNaluFromBuf(buffer, size, pos, &nalu); // 大于0的时候，高层Nal unit header后面去掉3个字节，3*8=24位
+
 	}
-	//for (uint8_t i = 0; i < pos; i++)
 	fileout.write(outbuffer, posout);
 	fileout.close();
 
 	delete[]buffer;
+	delete[]outbuffer;
 	return 0;
 }
